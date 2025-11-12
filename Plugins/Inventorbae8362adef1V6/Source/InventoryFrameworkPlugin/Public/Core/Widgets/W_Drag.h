@@ -57,6 +57,12 @@ public:
 	UPROPERTY(BlueprintReadWrite, Category = "Settings")
 	bool SkipCollisionCheck;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings", meta = (ExposeOnSpawn = true))
+	bool bQuickSplit;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings", meta = (ExposeOnSpawn = true))
+	int32 DraggedItemCount = 0;
+
 	UPROPERTY(BlueprintReadWrite, Category = "Stack")
 	FS_InventoryItem ItemToStackWith;
 
@@ -88,4 +94,7 @@ public:
 
 	UFUNCTION(Category = "Drag", BlueprintImplementableEvent, BlueprintCallable)
 	void RotateItem();
+
+	UFUNCTION(Category = "Drag", BlueprintImplementableEvent, BlueprintCallable)
+	void UpdateDragItemCount();
 };
