@@ -807,6 +807,9 @@ public:
 
 	void Internal_IncreaseItemCount(FS_UniqueID ItemID, int32 Count, int32& NewCount);
 
+	UFUNCTION(BlueprintImplementableEvent, BlueprintCallable)
+	void IncreaseTempItemCount(FS_InventoryItem ItemID, int32 Count, bool ShowTempValue);
+
 	/**Reduce an items stack count. Clamped min is 0.
 	 * If called on server, NewCount will always be accurate.
 	 * If called on client, NewCount will be predicted, and thus might
