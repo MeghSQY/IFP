@@ -1776,4 +1776,15 @@ protected:
 
 	UFUNCTION()
 	void LogItemFailedToSpawn(FS_InventoryItem Item, FString Reason);
+
+public:
+
+	UFUNCTION(BlueprintCallable, Category = "Inventory|GhostSystem")
+	TMap<FS_UniqueID, int32> CalculateGhostPacking(
+		FS_InventoryItem LeaderItem,
+		FS_UniqueID LeaderOriginalID, // NEW: Pass the REAL ID here to filter the array
+		int32 TargetTileIndex,
+		const TArray<FS_UniqueID>& SelectedIDs,
+		FS_ContainerSettings TargetContainer
+	);
 };

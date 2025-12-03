@@ -10472,3 +10472,200 @@ void UAC_Inventory::LogItemFailedToSpawn(FS_InventoryItem Item, FString Reason)
 {
 	UFL_InventoryFramework::LogIFPMessage(this, Reason, true, DebugMessages);
 }
+
+TMap<FS_UniqueID, int32> UAC_Inventory::CalculateGhostPacking(
+	FS_InventoryItem LeaderItem,
+	FS_UniqueID LeaderOriginalID,
+	int32 TargetTileIndex,
+	const TArray<FS_UniqueID>& SelectedIDs,
+	FS_ContainerSettings TargetContainer)
+{
+	TMap<FS_UniqueID, int32> GhostLocations;
+
+	if (!UFL_InventoryFramework::IsContainerValid(TargetContainer)) return GhostLocations;
+
+	// 1. Resolve & Sort Followers
+	TArray<FS_InventoryItem> Followers;
+	for (const FS_UniqueID& ID : SelectedIDs)
+	{
+		if (ID == LeaderOriginalID) continue;
+
+		FS_InventoryItem LiveItem = GetItemByUniqueID(ID);
+		if (LiveItem.IsValid()) Followers.Add(LiveItem);
+	}
+
+	// Sort Largest First
+	Followers.Sort([](const FS_InventoryItem& A, const FS_InventoryItem& B) {
+		const int32 AreaA = A.ItemAsset->ItemDimensions.X * A.ItemAsset->ItemDimensions.Y;
+		const int32 AreaB = B.ItemAsset->ItemDimensions.X * B.ItemAsset->ItemDimensions.Y;
+		return AreaA > AreaB;
+		});
+
+	// 2. Setup Data
+	TSet<int32> BlockedTiles;
+
+	// Add Non-Selected Items to Blocked Tiles
+	for (const FS_InventoryItem& ContainerItem : TargetContainer.Items)
+	{
+		bool bIsSelected = (ContainerItem.UniqueID == LeaderOriginalID) || SelectedIDs.Contains(ContainerItem.UniqueID);
+		if (bIsSelected) continue;
+
+		bool bInvalid = false;
+		TArray<FIntPoint> Shape = UFL_InventoryFramework::GetItemsShape(ContainerItem, bInvalid); // Container items use Context Shape
+		for (FIntPoint P : Shape)
+		{
+			int32 TileIdx = UFL_InventoryFramework::TileToIndex(P.X, P.Y, TargetContainer);
+			BlockedTiles.Add(TileIdx);
+		}
+	}
+
+	// Add Invalid/Hidden tiles
+	TArray<int32> IgnoredIndexes = GetGenericIndexesToIgnore(TargetContainer);
+	for (int32 Idx : IgnoredIndexes) BlockedTiles.Add(Idx);
+
+	// Helper for XY
+	auto GetTileXY = [&](int32 Index, int32& X, int32& Y)
+		{
+			UFL_InventoryFramework::IndexToTile(Index, TargetContainer, X, Y);
+		};
+
+	// 3. Calculate Leader Geometry (With Center Offset)
+	int32 MouseX, MouseY;
+	GetTileXY(TargetTileIndex, MouseX, MouseY);
+
+	// Get Dimensions (Swapped if Rotated)
+	FIntPoint LeaderDims = LeaderItem.ItemAsset->ItemDimensions;
+	if (LeaderItem.Rotation == ERotation::Ninety || LeaderItem.Rotation == ERotation::TwoSeventy)
+	{
+		int32 Temp = LeaderDims.X;
+		LeaderDims.X = LeaderDims.Y;
+		LeaderDims.Y = Temp;
+	}
+
+	// OFFSET CALCULATION: Shift Top-Left back by half dimensions
+	int32 LeaderTopLeftX = MouseX - (LeaderDims.X / 2);
+	int32 LeaderTopLeftY = MouseY - (LeaderDims.Y / 2);
+
+	// Clamp to bounds (Optional: Allows dragging against walls without snapping wildly)
+	// LeaderTopLeftX = FMath::Clamp(LeaderTopLeftX, 0, TargetContainer.Dimensions.X - LeaderDims.X);
+	// LeaderTopLeftY = FMath::Clamp(LeaderTopLeftY, 0, TargetContainer.Dimensions.Y - LeaderDims.Y);
+
+	int32 LeaderTopLeftIndex = UFL_InventoryFramework::TileToIndex(LeaderTopLeftX, LeaderTopLeftY, TargetContainer);
+
+
+	// 4. Place Leader (Priority 1)
+	{
+		bool bFits = true;
+		// Use Pure Shape for Dragged Item
+		TArray<FIntPoint> LeaderShape = LeaderItem.ItemAsset->GetItemsPureShape(LeaderItem.Rotation);
+
+		// Check every tile using the Calculated Top-Left
+		for (FIntPoint P : LeaderShape)
+		{
+			int32 X = LeaderTopLeftX + P.X;
+			int32 Y = LeaderTopLeftY + P.Y;
+
+			if (!UFL_InventoryFramework::IsTileValid(X, Y, TargetContainer)) { bFits = false; break; }
+
+			int32 Idx = UFL_InventoryFramework::TileToIndex(X, Y, TargetContainer);
+			if (BlockedTiles.Contains(Idx)) { bFits = false; break; }
+		}
+
+		if (bFits)
+		{
+			GhostLocations.Add(LeaderItem.UniqueID, LeaderTopLeftIndex);
+
+			// Mark Leader's spot as taken
+			for (FIntPoint P : LeaderShape)
+			{
+				int32 Idx = UFL_InventoryFramework::TileToIndex(LeaderTopLeftX + P.X, LeaderTopLeftY + P.Y, TargetContainer);
+				BlockedTiles.Add(Idx);
+			}
+		}
+		else
+		{
+			// If Leader doesn't fit, we return empty. 
+			// Visuals will likely turn Red or disappear.
+			return GhostLocations;
+		}
+	}
+
+	// Leader Center (Target for Followers)
+	// We use the Mouse Position (TargetTileIndex) as the gravity center.
+	FVector2D GravityCenter(MouseX + 0.5f, MouseY + 0.5f);
+
+	// 5. Place Followers
+	int32 ContainerSize = TargetContainer.Dimensions.X * TargetContainer.Dimensions.Y;
+
+	for (FS_InventoryItem& Follower : Followers)
+	{
+		int32 BestTile = -1;
+		float BestScore = MAX_flt;
+
+		TArray<FIntPoint> FollowerShape = Follower.ItemAsset->GetItemsPureShape(Follower.Rotation);
+		FIntPoint FollowerDims = Follower.ItemAsset->ItemDimensions;
+		if (Follower.Rotation == ERotation::Ninety || Follower.Rotation == ERotation::TwoSeventy)
+		{
+			int32 Temp = FollowerDims.X;
+			FollowerDims.X = FollowerDims.Y;
+			FollowerDims.Y = Temp;
+		}
+
+		for (int32 i = 0; i < ContainerSize; i++)
+		{
+			if (BlockedTiles.Contains(i)) continue;
+
+			// 1. Check Collision
+			bool bCollision = false;
+			int32 CurrentX, CurrentY;
+			GetTileXY(i, CurrentX, CurrentY);
+
+			for (FIntPoint P : FollowerShape)
+			{
+				int32 X = CurrentX + P.X;
+				int32 Y = CurrentY + P.Y;
+
+				if (!UFL_InventoryFramework::IsTileValid(X, Y, TargetContainer))
+				{
+					bCollision = true; break;
+				}
+
+				int32 Idx = UFL_InventoryFramework::TileToIndex(X, Y, TargetContainer);
+				if (BlockedTiles.Contains(Idx))
+				{
+					bCollision = true; break;
+				}
+			}
+
+			if (bCollision) continue;
+
+			// 2. Score (Distance to Gravity Center)
+			float ItemCenterX = CurrentX + (FollowerDims.X * 0.5f);
+			float ItemCenterY = CurrentY + (FollowerDims.Y * 0.5f);
+
+			float DistSq = FMath::Square(ItemCenterX - GravityCenter.X) + FMath::Square(ItemCenterY - GravityCenter.Y);
+
+			if (DistSq < BestScore)
+			{
+				BestScore = DistSq;
+				BestTile = i;
+			}
+		}
+
+		// Register Result
+		if (BestTile != -1)
+		{
+			GhostLocations.Add(Follower.UniqueID, BestTile);
+
+			int32 StartX, StartY;
+			GetTileXY(BestTile, StartX, StartY);
+			for (FIntPoint P : FollowerShape)
+			{
+				int32 Idx = UFL_InventoryFramework::TileToIndex(StartX + P.X, StartY + P.Y, TargetContainer);
+				BlockedTiles.Add(Idx);
+			}
+		}
+	}
+
+	return GhostLocations;
+}
