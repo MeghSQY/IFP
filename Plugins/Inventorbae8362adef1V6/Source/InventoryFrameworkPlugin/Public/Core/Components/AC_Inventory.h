@@ -89,6 +89,20 @@ DECLARE_DYNAMIC_DELEGATE(FAllItemAssetsLoaded);
 
 #pragma endregion
 
+USTRUCT(BlueprintType)
+struct FGhostPlacement
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 TileIndex = -1;
+
+	UPROPERTY(BlueprintReadOnly)
+	TEnumAsByte<ERotation> Rotation = ERotation::Zero;
+
+	FGhostPlacement() {}
+	FGhostPlacement(int32 InIndex, ERotation InRot) : TileIndex(InIndex), Rotation(InRot) {}
+};
 
 /**The inventory component that hosts everything related to
  * your inventory. Including containers and items and handling
@@ -1780,10 +1794,10 @@ protected:
 public:
 
 	UFUNCTION(BlueprintCallable, Category = "Inventory|GhostSystem")
-	TMap<FS_UniqueID, int32> CalculateGhostPacking(
+	TMap<FS_UniqueID, FGhostPlacement> CalculateGhostPacking(
 		FS_InventoryItem LeaderItem,
-		FS_UniqueID LeaderOriginalID, // NEW: Pass the REAL ID here to filter the array
-		int32 TargetTileIndex,
+		FS_UniqueID LeaderOriginalID,
+		int32 MouseHoverTileIndex,
 		const TArray<FS_UniqueID>& SelectedIDs,
 		FS_ContainerSettings TargetContainer
 	);
