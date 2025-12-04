@@ -1798,6 +1798,7 @@ public:
 		FS_InventoryItem LeaderItem,
 		FS_UniqueID LeaderOriginalID,
 		int32 MouseHoverTileIndex,
+		FIntPoint LeaderAnchor, // <--- NEW INPUT
 		const TArray<FS_UniqueID>& SelectedIDs,
 		FS_ContainerSettings TargetContainer
 	);
