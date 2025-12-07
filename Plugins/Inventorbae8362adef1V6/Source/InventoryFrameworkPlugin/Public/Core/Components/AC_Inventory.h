@@ -1797,8 +1797,8 @@ public:
 	TMap<FS_UniqueID, FGhostPlacement> CalculateGhostPacking(
 		FS_InventoryItem LeaderItem,
 		FS_UniqueID LeaderOriginalID,
-		int32 MouseHoverTileIndex,
-		FIntPoint LeaderAnchor, // <--- NEW INPUT
+		int32 TargetTileIndex,
+		FIntPoint LeaderAnchorPoint,
 		const TArray<FS_UniqueID>& SelectedIDs,
 		FS_ContainerSettings TargetContainer
 	);
