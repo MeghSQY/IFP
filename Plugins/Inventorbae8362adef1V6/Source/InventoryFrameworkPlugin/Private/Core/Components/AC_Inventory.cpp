@@ -10492,14 +10492,16 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 	TBitArray<> BlockedGrid;
 	BlockedGrid.Init(false, ContainerSize);
 
-	// Mark Existing Items (Standard Logic)
+	// Mark Existing Items (CRITICAL: Static Item Fix)
 	for (const FS_InventoryItem& ContainerItem : TargetContainer.Items)
 	{
+		// Skip selected items (they are moving)
 		bool bIsSelected = (ContainerItem.UniqueID == LeaderOriginalID) || SelectedIDs.Contains(ContainerItem.UniqueID);
 		if (bIsSelected) continue;
 
 		if (ContainerItem.ItemAsset)
 		{
+			// Use Pure Shape (Ground Truth)
 			TArray<FIntPoint> PureShape = ContainerItem.ItemAsset->GetItemsPureShape(ContainerItem.Rotation);
 			int32 X, Y;
 			UFL_InventoryFramework::IndexToTile(ContainerItem.TileIndex, TargetContainer, X, Y);
@@ -10525,7 +10527,7 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 		};
 
 
-	// --- 2. PLACE LEADER (The Anchor) ---
+	// --- 2. PLACE LEADER (Clamped Anchor) ---
 	int32 MouseX, MouseY;
 	GetTileXY(TargetTileIndex, MouseX, MouseY);
 
@@ -10535,11 +10537,10 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 		int32 Temp = LeaderDims.X; LeaderDims.X = LeaderDims.Y; LeaderDims.Y = Temp;
 	}
 
-	// Calculate True Top-Left from Anchor
 	int32 LeaderX = MouseX - LeaderAnchorPoint.X;
 	int32 LeaderY = MouseY - LeaderAnchorPoint.Y;
 
-	// Clamp to Bounds (Prevent Leader hanging off the edge)
+	// Clamp to Bounds (Fixes Edge Freezing)
 	LeaderX = FMath::Clamp(LeaderX, 0, TargetContainer.Dimensions.X - LeaderDims.X);
 	LeaderY = FMath::Clamp(LeaderY, 0, TargetContainer.Dimensions.Y - LeaderDims.Y);
 
@@ -10557,11 +10558,12 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 			if (Idx < 0 || Idx >= ContainerSize || BlockedGrid[Idx]) { bFits = false; break; }
 		}
 
-		// Register Leader
+		// Register Leader (So it appears as a ghost)
 		GhostLocations.Add(LeaderItem.UniqueID, FGhostPlacement(LeaderIndex, LeaderItem.Rotation));
 
 		if (bFits)
 		{
+			// Mark Leader's tiles so followers don't overlap it
 			for (FIntPoint P : LeaderShape)
 			{
 				int32 Idx = UFL_InventoryFramework::TileToIndex(LeaderX + P.X, LeaderY + P.Y, TargetContainer);
@@ -10570,12 +10572,12 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 		}
 		else
 		{
-			return GhostLocations; // Leader Collision -> Fail Group
+			return GhostLocations; // Leader Collision -> Fail
 		}
 	}
 
 
-	// --- 3. PREPARE FOLLOWERS (The Correct Fix) ---
+	// --- 3. PREPARE FOLLOWERS (Multi-Source Lookup) ---
 	FVector2D LeaderCenter(LeaderX + (LeaderDims.X * 0.5f), LeaderY + (LeaderDims.Y * 0.5f));
 
 	TArray<FS_InventoryItem> Followers;
@@ -10585,10 +10587,11 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 
 		FS_InventoryItem LiveItem;
 
-		// 1. Try Local Inventory First
+		// 1. Try Local Inventory
 		LiveItem = GetItemByUniqueID(ID);
 
-		// 2. Try External (Using the Parent Component stored inside the Leader's UniqueID)
+		// 2. Try External (Using UniqueID.ParentComponent)
+		// This uses the pointer stored INSIDE the ID structure.
 		if (!LiveItem.IsValid() && LeaderItem.UniqueID.ParentComponent && LeaderItem.UniqueID.ParentComponent != this)
 		{
 			LiveItem = LeaderItem.UniqueID.ParentComponent->GetItemByUniqueID(ID);
@@ -10643,6 +10646,7 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 			TestShapes.Add(S2);
 		}
 
+		// SCAN
 		for (int32 i = 0; i < ContainerSize; i++)
 		{
 			if (BlockedGrid[i]) continue;
