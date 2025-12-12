@@ -96,5 +96,11 @@ public:
 	void RotateItem();
 
 	UFUNCTION(Category = "Drag", BlueprintImplementableEvent, BlueprintCallable)
+	void RotateVertical();
+
+	UFUNCTION(Category = "Drag", BlueprintImplementableEvent, BlueprintCallable)
+	void RotateHorizontal();
+
+	UFUNCTION(Category = "Drag", BlueprintImplementableEvent, BlueprintCallable)
 	void UpdateDragItemCount();
 };

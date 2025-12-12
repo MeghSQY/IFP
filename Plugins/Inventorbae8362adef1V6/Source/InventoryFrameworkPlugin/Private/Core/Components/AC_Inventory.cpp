@@ -10705,3 +10705,145 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 
 	return GhostLocations;
 }
+
+bool UAC_Inventory::HasNestedItems(FS_UniqueID RootItemID)
+{
+	// --- Step 1: Get the Root Item's current "Address" ---
+	FS_InventoryItem RootItem = GetItemByUniqueID(RootItemID);
+	if (!RootItem.IsValid()) return false;
+
+	// We need these two coordinates to match the 'BelongsToItem' IntPoint
+	int32 RootContainerIdx = RootItem.ContainerIndex;
+	int32 RootItemIdx = RootItem.ItemIndex;
+
+	// --- Step 2: Find containers inside the Root Item (Backpack) ---
+	TArray<int32> FirstLevelContainerIndices;
+
+	for (int32 i = 0; i < ContainerSettings.Num(); i++)
+	{
+		// Check: Does this container point to the Root Item's address?
+		// Assuming X = ContainerIndex, Y = ItemIndex
+		if (ContainerSettings[i].BelongsToItem.X == RootContainerIdx &&
+			ContainerSettings[i].BelongsToItem.Y == RootItemIdx)
+		{
+			FirstLevelContainerIndices.Add(i);
+		}
+	}
+
+	if (FirstLevelContainerIndices.Num() == 0) return false;
+
+	// --- Step 3: Look inside the Backpack's containers ---
+	for (int32 ContainerIdx : FirstLevelContainerIndices)
+	{
+		if (!ContainerSettings.IsValidIndex(ContainerIdx)) continue;
+
+		// Scan all items inside the backpack
+		const TArray<FS_InventoryItem>& ItemsInside = ContainerSettings[ContainerIdx].Items;
+
+		for (const FS_InventoryItem& ChildItem : ItemsInside)
+		{
+			// --- Step 4: Check if this Child Item (e.g. Vest) is ALSO a parent ---
+			// We repeat the Address Lookup for the Child Item
+			int32 ChildContainerIdx = ChildItem.ContainerIndex;
+			int32 ChildItemIdx = ChildItem.ItemIndex;
+
+			for (const FS_ContainerSettings& PotentialChildContainer : ContainerSettings)
+			{
+				// Does this container belong to the Child Item?
+				if (PotentialChildContainer.BelongsToItem.X == ChildContainerIdx &&
+					PotentialChildContainer.BelongsToItem.Y == ChildItemIdx)
+				{
+					// Found a nested container (The Vest's storage)!
+					// Check if it has items (so we don't enable the button for empty vests)
+					if (PotentialChildContainer.Items.Num() > 0)
+					{
+						return true; // Found valid nested items!
+					}
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+void UAC_Inventory::RecursiveUnloadItem(FS_UniqueID RootItemID, int32 ExplicitTargetIndex)
+{
+	int32 FinalTargetIndex = ExplicitTargetIndex;
+
+	// --- Step 0: Get Root Item & Calculate Target ---
+	FS_InventoryItem RootItem = GetItemByUniqueID(RootItemID);
+	if (!RootItem.IsValid()) return;
+
+	// If this is the first call (no target set), dump items into the container holding the backpack.
+	if (FinalTargetIndex == -1)
+	{
+		FinalTargetIndex = RootItem.ContainerIndex;
+	}
+
+	// Capture the Root Item's Address (This is what its children point to)
+	// BelongsToItem.X matches ContainerIndex
+	// BelongsToItem.Y matches ItemIndex
+	int32 RootContainerIdx = RootItem.ContainerIndex;
+	int32 RootItemIdx = RootItem.ItemIndex;
+
+
+	// --- Step 1: Find Internal Containers ---
+	// Scan for containers that belong to this Root Item's address
+	TArray<int32> InternalContainerIndices;
+
+	for (int32 i = 0; i < ContainerSettings.Num(); i++)
+	{
+		if (i == FinalTargetIndex) continue; // Safety: Don't scan the target
+
+		if (ContainerSettings[i].BelongsToItem.X == RootContainerIdx &&
+			ContainerSettings[i].BelongsToItem.Y == RootItemIdx)
+		{
+			InternalContainerIndices.Add(i);
+		}
+	}
+
+	if (InternalContainerIndices.Num() == 0) return;
+
+
+	// --- Step 2: Iterate and Move ---
+	for (int32 SourceIndex : InternalContainerIndices)
+	{
+		// CRITICAL: Copy the array because MoveItem modifies the live one
+		TArray<FS_InventoryItem> ItemsToMove = ContainerSettings[SourceIndex].Items;
+
+		for (const FS_InventoryItem& ChildItem : ItemsToMove)
+		{
+			// --- Step 3: Recursion Check ---
+			// Before moving this child, check if IT is a parent to other containers.
+			bool bIsNestedContainer = false;
+
+			// Get the Child's Address
+			int32 ChildContainerIdx = ChildItem.ContainerIndex;
+			int32 ChildItemIdx = ChildItem.ItemIndex;
+
+			// Scan to see if any container points to this Child
+			for (const FS_ContainerSettings& Cont : ContainerSettings)
+			{
+				if (Cont.BelongsToItem.X == ChildContainerIdx &&
+					Cont.BelongsToItem.Y == ChildItemIdx)
+				{
+					bIsNestedContainer = true;
+					break;
+				}
+			}
+
+			if (bIsNestedContainer)
+			{
+				// RECURSE: Dive into the nested item (Vest) and dump its contents 
+				// directly to the FinalTarget (Main Inventory).
+				RecursiveUnloadItem(ChildItem.UniqueID, FinalTargetIndex);
+			}
+
+			// --- Step 4: Move the Item ---
+			// Now that the child is handled (or empty), move it.
+			// TileIndex -1 = Auto-pack.
+			MoveItem(ChildItem, FinalTargetIndex, -1);
+		}
+	}
+}
