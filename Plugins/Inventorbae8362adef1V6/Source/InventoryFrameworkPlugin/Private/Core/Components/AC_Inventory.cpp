@@ -10771,31 +10771,27 @@ void UAC_Inventory::RecursiveUnloadItem(FS_UniqueID RootItemID, int32 ExplicitTa
 {
 	int32 FinalTargetIndex = ExplicitTargetIndex;
 
-	// --- Step 0: Get Root Item & Calculate Target ---
+	// --- Step 1: Get Root Item & Calculate Target ---
 	FS_InventoryItem RootItem = GetItemByUniqueID(RootItemID);
 	if (!RootItem.IsValid()) return;
 
-	// If this is the first call (no target set), dump items into the container holding the backpack.
 	if (FinalTargetIndex == -1)
 	{
 		FinalTargetIndex = RootItem.ContainerIndex;
 	}
 
-	// Capture the Root Item's Address (This is what its children point to)
-	// BelongsToItem.X matches ContainerIndex
-	// BelongsToItem.Y matches ItemIndex
+	// Capture Address for lookup
 	int32 RootContainerIdx = RootItem.ContainerIndex;
 	int32 RootItemIdx = RootItem.ItemIndex;
 
-
-	// --- Step 1: Find Internal Containers ---
-	// Scan for containers that belong to this Root Item's address
+	// --- Step 2: Find Internal Containers ---
 	TArray<int32> InternalContainerIndices;
 
 	for (int32 i = 0; i < ContainerSettings.Num(); i++)
 	{
-		if (i == FinalTargetIndex) continue; // Safety: Don't scan the target
+		if (i == FinalTargetIndex) continue;
 
+		// Use Address Lookup (BelongsToItem X/Y)
 		if (ContainerSettings[i].BelongsToItem.X == RootContainerIdx &&
 			ContainerSettings[i].BelongsToItem.Y == RootItemIdx)
 		{
@@ -10805,24 +10801,19 @@ void UAC_Inventory::RecursiveUnloadItem(FS_UniqueID RootItemID, int32 ExplicitTa
 
 	if (InternalContainerIndices.Num() == 0) return;
 
-
-	// --- Step 2: Iterate and Move ---
+	// --- Step 3: Iterate and Move ---
 	for (int32 SourceIndex : InternalContainerIndices)
 	{
-		// CRITICAL: Copy the array because MoveItem modifies the live one
+		// Copy the array to avoid crash during modification
 		TArray<FS_InventoryItem> ItemsToMove = ContainerSettings[SourceIndex].Items;
 
 		for (const FS_InventoryItem& ChildItem : ItemsToMove)
 		{
-			// --- Step 3: Recursion Check ---
-			// Before moving this child, check if IT is a parent to other containers.
+			// --- Step 4: Recursion Check ---
 			bool bIsNestedContainer = false;
-
-			// Get the Child's Address
 			int32 ChildContainerIdx = ChildItem.ContainerIndex;
 			int32 ChildItemIdx = ChildItem.ItemIndex;
 
-			// Scan to see if any container points to this Child
 			for (const FS_ContainerSettings& Cont : ContainerSettings)
 			{
 				if (Cont.BelongsToItem.X == ChildContainerIdx &&
@@ -10835,15 +10826,24 @@ void UAC_Inventory::RecursiveUnloadItem(FS_UniqueID RootItemID, int32 ExplicitTa
 
 			if (bIsNestedContainer)
 			{
-				// RECURSE: Dive into the nested item (Vest) and dump its contents 
-				// directly to the FinalTarget (Main Inventory).
+				// RECURSE: Unload nested vest first
 				RecursiveUnloadItem(ChildItem.UniqueID, FinalTargetIndex);
 			}
 
-			// --- Step 4: Move the Item ---
-			// Now that the child is handled (or empty), move it.
-			// TileIndex -1 = Auto-pack.
-			MoveItem(ChildItem, FinalTargetIndex, -1);
+			// --- Step 5: The "Full Argument" MoveItem Call ---
+			// Matches the tooltip in your image exactly.
+			MoveItem(
+				ChildItem,          // ItemToMove
+				this,               // FromComponent (Self)
+				this,               // ToComponent (Self)
+				FinalTargetIndex,   // ToContainer
+				-1,                 // ToIndex (-1 = Auto)
+				ChildItem.Count,    // Count (Move all)
+				true,               // CallItemMoved (Update Delegates)
+				true,               // CallItemAdded (Update Delegates)
+				false,              // SkipCollisionCheck (Safe check)
+				ChildItem.Rotation  // NewRotation (Keep existing)
+			);
 		}
 	}
 }
