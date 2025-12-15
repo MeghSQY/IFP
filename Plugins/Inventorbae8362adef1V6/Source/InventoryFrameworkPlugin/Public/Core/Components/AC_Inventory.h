@@ -1803,9 +1803,6 @@ public:
 		FS_ContainerSettings TargetContainer
 	);
 
-	UFUNCTION(BlueprintCallable, Category = "Inventory|Validation")
-	bool HasNestedItems(FS_UniqueID RootItemID);
-
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Operations")
 	void RecursiveUnloadItem(FS_UniqueID RootItemID, int32 ExplicitTargetIndex = -1);
 };

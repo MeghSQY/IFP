@@ -33,6 +33,7 @@
 #include "LootTableSystem/Components/AC_LootTable.h"
 #include "LootTableSystem/Data/FL_LootTableHelpers.h"
 #include "Net/UnrealNetwork.h"
+#include "Core/Data/FL_InventoryFramework.h"
 
 struct FTagFragment;
 UE_DEFINE_GAMEPLAY_TAG(IFP_SkipValidation, "IFP.Initialization.SkipValidation");
@@ -10706,143 +10707,114 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 	return GhostLocations;
 }
 
-bool UAC_Inventory::HasNestedItems(FS_UniqueID RootItemID)
-{
-	// --- Step 1: Get the Root Item's current "Address" ---
-	FS_InventoryItem RootItem = GetItemByUniqueID(RootItemID);
-	if (!RootItem.IsValid()) return false;
-
-	// We need these two coordinates to match the 'BelongsToItem' IntPoint
-	int32 RootContainerIdx = RootItem.ContainerIndex;
-	int32 RootItemIdx = RootItem.ItemIndex;
-
-	// --- Step 2: Find containers inside the Root Item (Backpack) ---
-	TArray<int32> FirstLevelContainerIndices;
-
-	for (int32 i = 0; i < ContainerSettings.Num(); i++)
-	{
-		// Check: Does this container point to the Root Item's address?
-		// Assuming X = ContainerIndex, Y = ItemIndex
-		if (ContainerSettings[i].BelongsToItem.X == RootContainerIdx &&
-			ContainerSettings[i].BelongsToItem.Y == RootItemIdx)
-		{
-			FirstLevelContainerIndices.Add(i);
-		}
-	}
-
-	if (FirstLevelContainerIndices.Num() == 0) return false;
-
-	// --- Step 3: Look inside the Backpack's containers ---
-	for (int32 ContainerIdx : FirstLevelContainerIndices)
-	{
-		if (!ContainerSettings.IsValidIndex(ContainerIdx)) continue;
-
-		// Scan all items inside the backpack
-		const TArray<FS_InventoryItem>& ItemsInside = ContainerSettings[ContainerIdx].Items;
-
-		for (const FS_InventoryItem& ChildItem : ItemsInside)
-		{
-			// --- Step 4: Check if this Child Item (e.g. Vest) is ALSO a parent ---
-			// We repeat the Address Lookup for the Child Item
-			int32 ChildContainerIdx = ChildItem.ContainerIndex;
-			int32 ChildItemIdx = ChildItem.ItemIndex;
-
-			for (const FS_ContainerSettings& PotentialChildContainer : ContainerSettings)
-			{
-				// Does this container belong to the Child Item?
-				if (PotentialChildContainer.BelongsToItem.X == ChildContainerIdx &&
-					PotentialChildContainer.BelongsToItem.Y == ChildItemIdx)
-				{
-					// Found a nested container (The Vest's storage)!
-					// Check if it has items (so we don't enable the button for empty vests)
-					if (PotentialChildContainer.Items.Num() > 0)
-					{
-						return true; // Found valid nested items!
-					}
-				}
-			}
-		}
-	}
-
-	return false;
-}
-
 void UAC_Inventory::RecursiveUnloadItem(FS_UniqueID RootItemID, int32 ExplicitTargetIndex)
 {
+	// --- Step 1: Calculate Final Destination ---
 	int32 FinalTargetIndex = ExplicitTargetIndex;
 
-	// --- Step 1: Get Root Item & Calculate Target ---
-	FS_InventoryItem RootItem = GetItemByUniqueID(RootItemID);
-	if (!RootItem.IsValid()) return;
-
+	// If no target provided (-1), default to the container holding the Root Item (Backpack)
 	if (FinalTargetIndex == -1)
 	{
+		FS_InventoryItem RootItem = GetItemByUniqueID(RootItemID);
+		if (!RootItem.IsValid()) return;
 		FinalTargetIndex = RootItem.ContainerIndex;
 	}
 
-	// Capture Address for lookup
-	int32 RootContainerIdx = RootItem.ContainerIndex;
-	int32 RootItemIdx = RootItem.ItemIndex;
-
-	// --- Step 2: Find Internal Containers ---
-	TArray<int32> InternalContainerIndices;
+	// --- Step 2: Find Internal Containers (The "Backpack's Pockets") ---
+	TArray<int32> OwnedContainerIndices;
 
 	for (int32 i = 0; i < ContainerSettings.Num(); i++)
 	{
-		if (i == FinalTargetIndex) continue;
+		const FS_ContainerSettings& Cont = ContainerSettings[i];
 
-		// Use Address Lookup (BelongsToItem X/Y)
-		if (ContainerSettings[i].BelongsToItem.X == RootContainerIdx &&
-			ContainerSettings[i].BelongsToItem.Y == RootItemIdx)
+		// Safety Checks
+		if (i == FinalTargetIndex) continue; // Don't target self
+		if (Cont.ContainerType == EContainerType::ThisActor) continue;
+		if (Cont.Items.Num() == 0) continue;
+
+		// --- MANUAL OWNER LOOKUP (No Helper Function needed) ---
+		// We read the address directly.
+		int32 ParentC = Cont.BelongsToItem.X;
+		int32 ParentI = Cont.BelongsToItem.Y;
+
+		// Ensure the address points to a valid container index (Handles -1 safely)
+		if (ContainerSettings.IsValidIndex(ParentC))
 		{
-			InternalContainerIndices.Add(i);
+			const FS_ContainerSettings& ParentCont = ContainerSettings[ParentC];
+
+			// Ensure the address points to a valid item index
+			if (ParentCont.Items.IsValidIndex(ParentI))
+			{
+				// We found the Item that owns this container
+				const FS_InventoryItem& OwnerItem = ParentCont.Items[ParentI];
+
+				// Does this container belong to our Root Item?
+				if (OwnerItem.UniqueID == RootItemID)
+				{
+					OwnedContainerIndices.Add(i);
+				}
+			}
 		}
 	}
 
-	if (InternalContainerIndices.Num() == 0) return;
-
-	// --- Step 3: Iterate and Move ---
-	for (int32 SourceIndex : InternalContainerIndices)
+	// --- Step 3: Loop and Unload ---
+	for (int32 SourceIndex : OwnedContainerIndices)
 	{
-		// Copy the array to avoid crash during modification
-		TArray<FS_InventoryItem> ItemsToMove = ContainerSettings[SourceIndex].Items;
+		int32 SafetyCounter = 0;
 
-		for (const FS_InventoryItem& ChildItem : ItemsToMove)
+		// Use WHILE loop to handle array resizing
+		while (ContainerSettings[SourceIndex].Items.Num() > 0)
 		{
-			// --- Step 4: Recursion Check ---
-			bool bIsNestedContainer = false;
-			int32 ChildContainerIdx = ChildItem.ContainerIndex;
-			int32 ChildItemIdx = ChildItem.ItemIndex;
+			if (SafetyCounter++ > 500) break; // Emergency break
 
-			for (const FS_ContainerSettings& Cont : ContainerSettings)
+			// Grab the last item
+			int32 LastIdx = ContainerSettings[SourceIndex].Items.Num() - 1;
+			FS_InventoryItem ChildItem = ContainerSettings[SourceIndex].Items[LastIdx];
+
+			// --- Step 4: Recursion Check (Nested Logic) ---
+			bool bChildHasContainers = false;
+
+			// Check if ChildItem is a parent to any other container
+			for (int32 j = 0; j < ContainerSettings.Num(); j++)
 			{
-				if (Cont.BelongsToItem.X == ChildContainerIdx &&
-					Cont.BelongsToItem.Y == ChildItemIdx)
+				if (ContainerSettings[j].Items.Num() == 0) continue;
+
+				// Manual Lookup for Child's Containers
+				int32 ChildParentC = ContainerSettings[j].BelongsToItem.X;
+				int32 ChildParentI = ContainerSettings[j].BelongsToItem.Y;
+
+				if (ContainerSettings.IsValidIndex(ChildParentC))
 				{
-					bIsNestedContainer = true;
-					break;
+					// Check if this container points to the ChildItem's current location
+					// We match Location (ContainerIndex, ItemIndex) since ChildItem came from there
+					if (ChildParentC == ChildItem.ContainerIndex &&
+						ChildParentI == ChildItem.ItemIndex)
+					{
+						bChildHasContainers = true;
+						break;
+					}
 				}
 			}
 
-			if (bIsNestedContainer)
+			if (bChildHasContainers)
 			{
-				// RECURSE: Unload nested vest first
+				// Unload the Child (e.g., Vest) first
 				RecursiveUnloadItem(ChildItem.UniqueID, FinalTargetIndex);
 			}
 
-			// --- Step 5: The "Full Argument" MoveItem Call ---
-			// Matches the tooltip in your image exactly.
+			// --- Step 5: Move Item ---
+			// Explicitly casting Rotation to fix potential TEnumAsByte squiggle
 			MoveItem(
-				ChildItem,          // ItemToMove
-				this,               // FromComponent (Self)
-				this,               // ToComponent (Self)
-				FinalTargetIndex,   // ToContainer
-				-1,                 // ToIndex (-1 = Auto)
-				ChildItem.Count,    // Count (Move all)
-				true,               // CallItemMoved (Update Delegates)
-				true,               // CallItemAdded (Update Delegates)
-				false,              // SkipCollisionCheck (Safe check)
-				ChildItem.Rotation  // NewRotation (Keep existing)
+				ChildItem,               // ItemToMove
+				this,                    // FromComponent
+				this,                    // ToComponent
+				FinalTargetIndex,        // ToContainer
+				-1,                      // ToIndex
+				ChildItem.Count,         // Count
+				true,                    // CallItemMoved
+				true,                    // CallItemAdded
+				false,                   // SkipCollisionCheck
+				TEnumAsByte<ERotation>(ChildItem.Rotation) // Explicit Cast
 			);
 		}
 	}
