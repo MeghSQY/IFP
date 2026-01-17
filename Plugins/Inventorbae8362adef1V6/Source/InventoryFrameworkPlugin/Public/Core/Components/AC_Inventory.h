@@ -1802,4 +1802,16 @@ public:
 		const TArray<FS_UniqueID>& SelectedIDs,
 		FS_ContainerSettings TargetContainer
 	);
+
+	UFUNCTION(BlueprintCallable, Category = "Inventory | Custom Sorting")
+	void SortContainerByWeight(int32 ContainerIndex, bool bDescending = true);
+
+	UFUNCTION(BlueprintCallable, Category = "Inventory | Custom Sorting")
+	void SortContainerByRarity(int32 ContainerIndex, bool bDescending = true);
+
+	UFUNCTION(BlueprintCallable, Category = "Inventory | Custom Sorting")
+	void SortContainerByStackCount(int32 ContainerIndex, bool bDescending = true);
+
+	UFUNCTION(BlueprintCallable, Category = "Inventory | Custom Sorting")
+	void SortContainerByPrice(int32 ContainerIndex, bool bDescending = true);
 };

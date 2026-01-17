@@ -21,6 +21,7 @@
 #include "Core/Interfaces/I_InventoryExtension.h"
 #include "Core/Traits/IT_ItemComponentTrait.h"
 #include "Core/Widgets/W_Container.h"
+#include "Core/Traits/IT_Pricing.h"
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetMathLibrary.h"
 #include "Kismet/KismetSystemLibrary.h"
@@ -33,7 +34,7 @@
 #include "LootTableSystem/Components/AC_LootTable.h"
 #include "LootTableSystem/Data/FL_LootTableHelpers.h"
 #include "Net/UnrealNetwork.h"
-#include "Core/Data/FL_InventoryFramework.h"
+#include "GameplayTagContainer.h"
 
 struct FTagFragment;
 UE_DEFINE_GAMEPLAY_TAG(IFP_SkipValidation, "IFP.Initialization.SkipValidation");
@@ -10705,4 +10706,398 @@ TMap<FS_UniqueID, FGhostPlacement> UAC_Inventory::CalculateGhostPacking(
 	}
 
 	return GhostLocations;
+}
+
+void UAC_Inventory::SortContainerByWeight(int32 ContainerIndex, bool bDescending)
+{
+	// 1. Validation
+	if (!ContainerSettings.IsValidIndex(ContainerIndex))
+	{
+		return;
+	}
+
+	FS_ContainerSettings& ContainerRef = ContainerSettings[ContainerIndex];
+	UAC_Inventory* ParentComponent = this;
+
+	// 2. Clear the tile map (Wipes the spatial grid so we can repack)
+	InitializeTileMap(ContainerRef);
+
+	// 3. Create a local copy of items to sort
+	TArray<FS_InventoryItem> SortedItems = ContainerRef.Items;
+
+	// 4. SORT LOGIC: "Weight" = Number of Blocks (Tile Count)
+	SortedItems.Sort([&](const FS_InventoryItem& A, const FS_InventoryItem& B)
+		{
+			if (!IsValid(A.ItemAsset) || !IsValid(B.ItemAsset)) return false;
+
+			// Get the exact number of tiles this item occupies (Shape Array Length)
+			// We pass 'Zero' rotation because the number of blocks is constant regardless of rotation.
+			int32 BlocksA = A.ItemAsset->GetItemsPureShape(ERotation::Zero).Num();
+			int32 BlocksB = B.ItemAsset->GetItemsPureShape(ERotation::Zero).Num();
+
+			// Fallback: If shape array is empty (some items might rely purely on dimensions)
+			if (BlocksA == 0) BlocksA = A.ItemAsset->ItemDimensions.X * A.ItemAsset->ItemDimensions.Y;
+			if (BlocksB == 0) BlocksB = B.ItemAsset->ItemDimensions.X * B.ItemAsset->ItemDimensions.Y;
+
+			// Descending = Biggest Items First (Heavier)
+			return bDescending ? (BlocksA > BlocksB) : (BlocksA < BlocksB);
+		});
+
+	// 5. Update Data-Only Containers (No grid to pack)
+	if (!ContainerRef.SupportsTileMap())
+	{
+		ContainerRef.Items = SortedItems;
+		RefreshItemsIndexes(ContainerRef);
+		SortingFinished.Broadcast();
+		return;
+	}
+
+	// 6. RE-PACKING LOGIC
+	ContainerRef.Items.Empty();
+
+	FRandomStream Seed;
+	Seed.Initialize(UKismetMathLibrary::RandomIntegerInRange(1, 214748364));
+
+	for (auto& CurrentItem : SortedItems)
+	{
+		// Add item back to the array temporarily so the system is aware of it
+		ContainerRef.Items.Add(CurrentItem);
+		CurrentItem.ItemIndex = ContainerRef.Items.Num() - 1;
+
+		bool SpotFound;
+		int32 AvailableTile;
+		TEnumAsByte<ERotation> NeededRotation;
+
+		// Find the first available spot
+		GetFirstAvailableTile(CurrentItem, ContainerRef, GetGenericIndexesToIgnore(ContainerRef), SpotFound, AvailableTile, NeededRotation);
+
+		if (SpotFound)
+		{
+			// Get any containers inside this item (like a backpack inside a chest)
+			TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+
+			// Use internal move function to handle placement logic
+			Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, ContainerRef.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+		}
+		else
+		{
+			// If sorting made it impossible to fit, try other containers or drop
+			FS_ContainerSettings CompatibleContainer;
+			GetFirstAvailableContainerAndTile(CurrentItem, TArray<int32>(), SpotFound, CompatibleContainer, AvailableTile, NeededRotation);
+
+			if (SpotFound)
+			{
+				TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+				Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, CompatibleContainer.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+			}
+			else
+			{
+				DropItem(CurrentItem);
+			}
+		}
+	}
+
+	// 7. Notify listeners
+	SortingFinished.Broadcast();
+}
+
+void UAC_Inventory::SortContainerByRarity(int32 ContainerIndex, bool bDescending)
+{
+	if (!ContainerSettings.IsValidIndex(ContainerIndex)) return;
+
+	FS_ContainerSettings& ContainerRef = ContainerSettings[ContainerIndex];
+	UAC_Inventory* ParentComponent = this;
+	InitializeTileMap(ContainerRef);
+	TArray<FS_InventoryItem> SortedItems = ContainerRef.Items;
+
+	// --- SORT BY RARITY ---
+	SortedItems.Sort([&](const FS_InventoryItem& A, const FS_InventoryItem& B)
+		{
+			if (!IsValid(A.ItemAsset) || !IsValid(B.ItemAsset)) return false;
+
+			auto GetRarityScore = [&](const UDA_CoreItem* ItemAsset) -> int32
+				{
+					const FTagFragment* TagFrag = nullptr;
+
+					// 1. Find the Tag Fragment (Asset Fragments)
+					for (const TInstancedStruct<FCoreFragment>& Fragment : ItemAsset->ItemAssetFragments)
+					{
+						if (const FTagFragment* FoundFrag = Fragment.GetPtr<FTagFragment>())
+						{
+							TagFrag = FoundFrag;
+							break;
+						}
+					}
+
+					// 2. If not in Asset, check Struct Fragments (Just in case)
+					if (!TagFrag)
+					{
+						for (const TInstancedStruct<FCoreFragment>& Fragment : ItemAsset->ItemStructFragments)
+						{
+							if (const FTagFragment* FoundFrag = Fragment.GetPtr<FTagFragment>())
+							{
+								TagFrag = FoundFrag;
+								break;
+							}
+						}
+					}
+
+					if (!TagFrag) return 0; // No tags found
+
+					// 3. CHECK THE EXACT TAG NAMES
+					// Based on your description: "IFP.ItemData.Rarity.3-Rare"
+
+					// Score 5: Legendary
+					if (TagFrag->Tags.HasTag(FGameplayTag::RequestGameplayTag(FName("IFP.ItemData.Rarity.5-Legendary")))) return 5;
+
+					// Score 4: Epic
+					if (TagFrag->Tags.HasTag(FGameplayTag::RequestGameplayTag(FName("IFP.ItemData.Rarity.4-Epic")))) return 4;
+
+					// Score 3: Rare
+					if (TagFrag->Tags.HasTag(FGameplayTag::RequestGameplayTag(FName("IFP.ItemData.Rarity.3-Rare")))) return 3;
+
+					// Score 2: Uncommon
+					if (TagFrag->Tags.HasTag(FGameplayTag::RequestGameplayTag(FName("IFP.ItemData.Rarity.2-Uncommon")))) return 2;
+
+					// Score 1: Common (or 1-Common / 0-Common depending on your list)
+					if (TagFrag->Tags.HasTag(FGameplayTag::RequestGameplayTag(FName("IFP.ItemData.Rarity.1-Common")))) return 1;
+					// Some IFP versions use 0-Common or just "Common", add those lines if needed:
+					if (TagFrag->Tags.HasTag(FGameplayTag::RequestGameplayTag(FName("IFP.ItemData.Rarity.0-Common")))) return 1;
+
+					return 0;
+				};
+
+			int32 ScoreA = GetRarityScore(A.ItemAsset);
+			int32 ScoreB = GetRarityScore(B.ItemAsset);
+
+			return bDescending ? (ScoreA > ScoreB) : (ScoreA < ScoreB);
+		});
+
+	// --- REPACK LOGIC (Standard) ---
+	if (!ContainerRef.SupportsTileMap())
+	{
+		ContainerRef.Items = SortedItems;
+		RefreshItemsIndexes(ContainerRef);
+		SortingFinished.Broadcast();
+		return;
+	}
+
+	ContainerRef.Items.Empty();
+	FRandomStream Seed;
+	Seed.Initialize(UKismetMathLibrary::RandomIntegerInRange(1, 214748364));
+
+	for (auto& CurrentItem : SortedItems)
+	{
+		ContainerRef.Items.Add(CurrentItem);
+		CurrentItem.ItemIndex = ContainerRef.Items.Num() - 1;
+
+		bool SpotFound;
+		int32 AvailableTile;
+		TEnumAsByte<ERotation> NeededRotation;
+
+		GetFirstAvailableTile(CurrentItem, ContainerRef, GetGenericIndexesToIgnore(ContainerRef), SpotFound, AvailableTile, NeededRotation);
+
+		if (SpotFound)
+		{
+			TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+			Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, ContainerRef.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+		}
+		else
+		{
+			FS_ContainerSettings CompatibleContainer;
+			GetFirstAvailableContainerAndTile(CurrentItem, TArray<int32>(), SpotFound, CompatibleContainer, AvailableTile, NeededRotation);
+			if (SpotFound)
+			{
+				TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+				Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, CompatibleContainer.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+			}
+			else
+			{
+				DropItem(CurrentItem);
+			}
+		}
+	}
+	SortingFinished.Broadcast();
+}
+
+void UAC_Inventory::SortContainerByStackCount(int32 ContainerIndex, bool bDescending)
+{
+	if (!ContainerSettings.IsValidIndex(ContainerIndex)) return;
+
+	FS_ContainerSettings& ContainerRef = ContainerSettings[ContainerIndex];
+	UAC_Inventory* ParentComponent = this;
+	InitializeTileMap(ContainerRef);
+	TArray<FS_InventoryItem> SortedItems = ContainerRef.Items;
+
+	// --- SORT BY STACK COUNT ---
+	SortedItems.Sort([&](const FS_InventoryItem& A, const FS_InventoryItem& B)
+		{
+			// Simple Integer Sort: Compare the current quantity of items
+			int32 CountA = A.Count;
+			int32 CountB = B.Count;
+
+			return bDescending ? (CountA > CountB) : (CountA < CountB);
+		});
+
+	// --- REPACK LOGIC (Standard) ---
+	if (!ContainerRef.SupportsTileMap())
+	{
+		ContainerRef.Items = SortedItems;
+		RefreshItemsIndexes(ContainerRef);
+		SortingFinished.Broadcast();
+		return;
+	}
+
+	ContainerRef.Items.Empty();
+	FRandomStream Seed;
+	Seed.Initialize(UKismetMathLibrary::RandomIntegerInRange(1, 214748364));
+
+	for (auto& CurrentItem : SortedItems)
+	{
+		ContainerRef.Items.Add(CurrentItem);
+		CurrentItem.ItemIndex = ContainerRef.Items.Num() - 1;
+
+		bool SpotFound;
+		int32 AvailableTile;
+		TEnumAsByte<ERotation> NeededRotation;
+
+		GetFirstAvailableTile(CurrentItem, ContainerRef, GetGenericIndexesToIgnore(ContainerRef), SpotFound, AvailableTile, NeededRotation);
+
+		if (SpotFound)
+		{
+			TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+			Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, ContainerRef.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+		}
+		else
+		{
+			FS_ContainerSettings CompatibleContainer;
+			GetFirstAvailableContainerAndTile(CurrentItem, TArray<int32>(), SpotFound, CompatibleContainer, AvailableTile, NeededRotation);
+			if (SpotFound)
+			{
+				TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+				Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, CompatibleContainer.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+			}
+			else
+			{
+				DropItem(CurrentItem);
+			}
+		}
+	}
+	SortingFinished.Broadcast();
+}
+
+void UAC_Inventory::SortContainerByPrice(int32 ContainerIndex, bool bDescending)
+{
+	if (!ContainerSettings.IsValidIndex(ContainerIndex)) return;
+
+	FS_ContainerSettings& ContainerRef = ContainerSettings[ContainerIndex];
+	UAC_Inventory* ParentComponent = this;
+	InitializeTileMap(ContainerRef);
+	TArray<FS_InventoryItem> SortedItems = ContainerRef.Items;
+
+	// --- SMART SORT BY PRICE (Item + Contents) ---
+	SortedItems.Sort([&](const FS_InventoryItem& A, const FS_InventoryItem& B)
+		{
+			// Helper to Calculate Total Value
+			auto GetTotalValue = [&](const FS_InventoryItem& Item) -> float
+				{
+					if (!IsValid(Item.ItemAsset)) return 0.0f;
+
+					// A. Get Base Price (From Trait)
+					float BasePrice = 0.0f;
+					for (const auto& Trait : Item.ItemAsset->TraitsAndComponents)
+					{
+						if (const UIT_Pricing* PricingTrait = Cast<UIT_Pricing>(Trait))
+						{
+							BasePrice = PricingTrait->Price;
+							break;
+						}
+					}
+
+					// Multiply by Stack Count
+					float TotalValue = BasePrice * Item.Count;
+
+					// B. Get Content Value (If this item is a backpack)
+					if (ParentComponent)
+					{
+						for (const FS_ContainerSettings& PotentialChildContainer : ParentComponent->ContainerSettings)
+						{
+							// FIX: Use 'BelongsToItem.Y' to match the Item's UniqueID IdentityNumber
+							if (PotentialChildContainer.BelongsToItem.Y == Item.UniqueID.IdentityNumber)
+							{
+								// Loop through items inside the backpack
+								for (const FS_InventoryItem& SubItem : PotentialChildContainer.Items)
+								{
+									if (!IsValid(SubItem.ItemAsset)) continue;
+
+									float SubPrice = 0.0f;
+									for (const auto& SubTrait : SubItem.ItemAsset->TraitsAndComponents)
+									{
+										if (const UIT_Pricing* P = Cast<UIT_Pricing>(SubTrait))
+										{
+											SubPrice = P->Price;
+											break;
+										}
+									}
+									TotalValue += (SubPrice * SubItem.Count);
+								}
+							}
+						}
+					}
+
+					return TotalValue;
+				};
+
+			float ValueA = GetTotalValue(A);
+			float ValueB = GetTotalValue(B);
+
+			// Sort: Descending = Most Valuable First
+			return bDescending ? (ValueA > ValueB) : (ValueA < ValueB);
+		});
+
+	// --- REPACK LOGIC (Standard) ---
+	if (!ContainerRef.SupportsTileMap())
+	{
+		ContainerRef.Items = SortedItems;
+		RefreshItemsIndexes(ContainerRef);
+		SortingFinished.Broadcast();
+		return;
+	}
+
+	ContainerRef.Items.Empty();
+	FRandomStream Seed;
+	Seed.Initialize(UKismetMathLibrary::RandomIntegerInRange(1, 214748364));
+
+	for (auto& CurrentItem : SortedItems)
+	{
+		ContainerRef.Items.Add(CurrentItem);
+		CurrentItem.ItemIndex = ContainerRef.Items.Num() - 1;
+
+		bool SpotFound;
+		int32 AvailableTile;
+		TEnumAsByte<ERotation> NeededRotation;
+
+		GetFirstAvailableTile(CurrentItem, ContainerRef, GetGenericIndexesToIgnore(ContainerRef), SpotFound, AvailableTile, NeededRotation);
+
+		if (SpotFound)
+		{
+			TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+			Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, ContainerRef.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+		}
+		else
+		{
+			FS_ContainerSettings CompatibleContainer;
+			GetFirstAvailableContainerAndTile(CurrentItem, TArray<int32>(), SpotFound, CompatibleContainer, AvailableTile, NeededRotation);
+			if (SpotFound)
+			{
+				TArray<FS_ContainerSettings> ItemsContainers = GetItemsChildrenContainers(CurrentItem);
+				Internal_MoveItem(CurrentItem, ParentComponent, ParentComponent, CompatibleContainer.ContainerIndex, AvailableTile, CurrentItem.Count, true, false, true, NeededRotation, ItemsContainers, Seed);
+			}
+			else
+			{
+				DropItem(CurrentItem);
+			}
+		}
+	}
+	SortingFinished.Broadcast();
 }
