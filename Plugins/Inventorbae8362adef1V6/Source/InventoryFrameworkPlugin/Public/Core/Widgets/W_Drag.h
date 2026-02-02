@@ -64,6 +64,9 @@ public:
 	bool bSingleSplit;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings", meta = (ExposeOnSpawn = true))
+	bool bBatchSplit;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Settings", meta = (ExposeOnSpawn = true))
 	int32 DraggedItemCount = 0;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Stack")
