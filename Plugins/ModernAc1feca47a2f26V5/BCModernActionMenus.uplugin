@@ -1,0 +1,36 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.1",
+	"FriendlyName": "Modern Action Menus",
+	"Description": "UMG based system for quickly creating functional and extendable action menus. Provides out-of-the-box support for context, dropdown, and file menu use cases.",
+	"Category": "UI",
+	"CreatedBy": "Bartschi Creative",
+	"CreatedByURL": "https://github.com/bbartschi14/",
+	"DocsURL": "https://skillful-cloche-8c5.notion.site/Modern-Action-Menus-19943d015c7780408ea0dd5757c26678",
+	"MarketplaceURL": "",
+	"SupportURL": "https://discord.gg/mWZm9u2cSW",
+	"EngineVersion": "5.6.0",
+	"CanContainContent": true,
+	"Installed": true,
+	"Modules": [
+		{
+			"Name": "BCModernActionMenus",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64",
+				"Mac"
+			]
+		},
+		{
+			"Name": "BCModernActionMenusEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64",
+				"Mac"
+			]
+		}
+	]
+}
